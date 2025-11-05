@@ -25,10 +25,15 @@ id_ed25519
 node_modules/
 venv/
 .venv/
+env/
+ENV/
 
 # Python
 __pycache__/
 *.py[cod]
+*$py.class
+*.so
+.Python
 *.egg-info/
 dist/
 build/
@@ -42,3 +47,9 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+
+# Project
+downloads/
+transcripts/
+*.log
+.worktrees/
