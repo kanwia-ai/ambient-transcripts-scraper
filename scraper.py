@@ -6,7 +6,10 @@ This script automates downloading transcripts from app.ambient.us.
 It supports both Meeting Series and Project pages.
 
 Usage:
-    python scraper.py
+    python scraper.py [--browser-path /path/to/chromium]
+
+Environment Variables:
+    CHROMIUM_PATH - Path to Chromium executable
 
 The script will:
 1. Launch a Chromium browser
@@ -15,6 +18,7 @@ The script will:
 4. Download all transcripts (skipping existing ones)
 """
 
+import argparse
 import asyncio
 import os
 import re
@@ -27,9 +31,10 @@ from playwright.async_api import async_playwright, Page, Browser, BrowserContext
 
 
 class AmbientScraper:
-    def __init__(self, download_dir: str = "./transcripts"):
+    def __init__(self, download_dir: str = "./transcripts", browser_path: Optional[str] = None):
         self.download_dir = Path(download_dir)
         self.download_dir.mkdir(exist_ok=True)
+        self.browser_path = browser_path or os.environ.get('CHROMIUM_PATH')
         self.browser: Optional[Browser] = None
         self.context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
@@ -38,11 +43,19 @@ class AmbientScraper:
         """Initialize Playwright and launch browser."""
         self.playwright = await async_playwright().start()
 
+        # Prepare launch options
+        launch_options = {
+            'headless': False,
+            'args': ['--start-maximized']
+        }
+
+        # Use custom browser path if provided
+        if self.browser_path:
+            launch_options['executable_path'] = self.browser_path
+            print(f"Using Chromium at: {self.browser_path}")
+
         # Launch browser with visible UI so user can log in
-        self.browser = await self.playwright.chromium.launch(
-            headless=False,
-            args=['--start-maximized']
-        )
+        self.browser = await self.playwright.chromium.launch(**launch_options)
 
         self.context = await self.browser.new_context(
             viewport=None,
@@ -326,7 +339,27 @@ class AmbientScraper:
 
 
 async def main():
-    scraper = AmbientScraper()
+    parser = argparse.ArgumentParser(
+        description='Download transcripts from Ambient meeting series or projects'
+    )
+    parser.add_argument(
+        '--browser-path',
+        type=str,
+        help='Path to Chromium executable (or set CHROMIUM_PATH env var)'
+    )
+    parser.add_argument(
+        '--download-dir',
+        type=str,
+        default='./transcripts',
+        help='Directory to save transcripts (default: ./transcripts)'
+    )
+
+    args = parser.parse_args()
+
+    scraper = AmbientScraper(
+        download_dir=args.download_dir,
+        browser_path=args.browser_path
+    )
     await scraper.run()
 
 

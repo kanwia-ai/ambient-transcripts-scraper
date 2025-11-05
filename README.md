@@ -44,6 +44,26 @@ playwright install chromium
 python scraper.py
 ```
 
+### Using Your Own Chromium Installation
+
+If you already have Chromium installed or can't install Playwright's browser:
+
+**Option 1: Command-line argument**
+```bash
+python scraper.py --browser-path /path/to/chromium
+```
+
+**Option 2: Environment variable**
+```bash
+export CHROMIUM_PATH=/path/to/chromium
+python scraper.py
+```
+
+**Finding your Chromium path:**
+```bash
+which chromium  # or chromium-browser, google-chrome, etc.
+```
+
 ### Step-by-Step Process
 
 1. **Run the script**:
