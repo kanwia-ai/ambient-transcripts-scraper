@@ -12,3 +12,4 @@ ENV/
 .vscode/
 .idea/
 *.log
+.worktrees/
