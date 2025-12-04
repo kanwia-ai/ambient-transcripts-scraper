@@ -1,0 +1,18 @@
+{
+  "meeting_series_to_client": {
+    "Ambient_ Project": "Asurion",
+    "AIT Consulting Weekly": "AIT_Internal",
+    "All Hands": "Section_Internal",
+    "Weekly Proposal Review": "Section_Internal",
+    "Kyra & Alli 1x1": "Section_Internal",
+    "Team Meetings": "Section_Internal",
+    "External": "External_Meetings"
+  },
+  "filename_patterns": {
+    "Asurion": "Asurion",
+    "Section": "Section_Internal",
+    "AIT": "AIT_Internal",
+    "Havas": "Havas"
+  },
+  "default_client": "Other"
+}
