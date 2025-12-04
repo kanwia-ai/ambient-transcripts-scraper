@@ -342,8 +342,94 @@ class AmbientScraper:
         except Exception as e:
             print(f"❌ Error downloading transcript: {e}")
 
+    async def get_all_meeting_series_urls(self) -> List[str]:
+        """Get URLs for all meeting series from the Meeting Series page.
+
+        Returns:
+            List of meeting series URLs
+        """
+        print("\n📋 Fetching all meeting series...")
+
+        # Navigate to Meeting Series page
+        await self.page.goto('https://app.ambient.us/dashboard/meetingseries')
+        await self.page.wait_for_load_state('networkidle')
+        await asyncio.sleep(2)
+
+        # Find all meeting series links
+        series_urls = await self.page.evaluate('''() => {
+            const links = document.querySelectorAll('a[href*="/meetingseries/"]');
+            const urls = [];
+            const seen = new Set();
+
+            links.forEach(link => {
+                const href = link.href;
+                // Skip the main meetingseries page itself
+                if (href.match(/\\/meetingseries\\/[^/]+$/)) {
+                    if (!seen.has(href)) {
+                        seen.add(href);
+                        urls.push(href);
+                    }
+                }
+            });
+
+            return urls;
+        }''')
+
+        print(f"  Found {len(series_urls)} meeting series")
+        return series_urls
+
+    async def run_all_series(self):
+        """Process all meeting series automatically.
+
+        Iterates through all meeting series and scrapes transcripts from each.
+        """
+        try:
+            await self.setup()
+
+            # Get all meeting series URLs
+            series_urls = await self.get_all_meeting_series_urls()
+
+            if not series_urls:
+                print("❌ No meeting series found")
+                return
+
+            print(f"\n📊 Will process {len(series_urls)} meeting series\n")
+
+            for idx, url in enumerate(series_urls):
+                print(f"\n{'='*60}")
+                print(f"[{idx+1}/{len(series_urls)}] Processing: {url}")
+                print('='*60)
+
+                try:
+                    await self.page.goto(url)
+                    await self.page.wait_for_load_state('networkidle')
+                    await asyncio.sleep(1)
+
+                    await self.scrape_meeting_series()
+                except Exception as e:
+                    print(f"❌ Error processing series: {e}")
+                    continue
+
+            print("\n🎉 Finished processing all meeting series!")
+
+        except Exception as e:
+            print(f"\n❌ Error: {e}")
+            import traceback
+            traceback.print_exc()
+
+        finally:
+            if self.browser:
+                await self.browser.close()
+            if hasattr(self, 'playwright'):
+                await self.playwright.stop()
+
     async def run(self):
         """Main execution flow."""
+        # If all_series mode, delegate to run_all_series
+        if self.all_series:
+            await self.run_all_series()
+            return
+
         try:
             await self.setup()
 
@@ -357,8 +443,9 @@ class AmbientScraper:
                 await self.scrape_project()
 
             print("\n🎉 All done!")
-            print("\nPress ENTER to close the browser...")
-            input()
+            if not self.auto_mode:
+                print("\nPress ENTER to close the browser...")
+                input()
 
         except Exception as e:
             print(f"\n❌ Error: {e}")

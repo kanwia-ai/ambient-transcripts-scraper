@@ -46,3 +46,17 @@ def test_scraper_target_url_defaults_to_none():
     """Scraper target_url should default to None."""
     scraper = AmbientScraper(download_dir="/tmp/test_transcripts")
     assert scraper.target_url is None
+
+
+def test_scraper_has_get_all_meeting_series_method():
+    """Scraper should have get_all_meeting_series_urls method."""
+    scraper = AmbientScraper(download_dir="/tmp/test_transcripts")
+    assert hasattr(scraper, 'get_all_meeting_series_urls')
+    assert callable(scraper.get_all_meeting_series_urls)
+
+
+def test_scraper_has_run_all_series_method():
+    """Scraper should have run_all_series method."""
+    scraper = AmbientScraper(download_dir="/tmp/test_transcripts")
+    assert hasattr(scraper, 'run_all_series')
+    assert callable(scraper.run_all_series)
