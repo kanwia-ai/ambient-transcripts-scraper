@@ -1,0 +1,10 @@
+{
+  "testCommand": "pytest -v --tb=short",
+  "lintCommand": "python -m py_compile src/*.py daily_sync.py 2>&1 || true",
+  "requireCoverage": false,
+  "minCoverage": 70,
+  "autoFix": false,
+  "maxAttempts": 50,
+  "stopOnMorning": true,
+  "morningHour": 7
+}
