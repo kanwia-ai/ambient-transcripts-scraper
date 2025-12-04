@@ -31,13 +31,23 @@ from playwright.async_api import async_playwright, Page, Browser, BrowserContext
 
 
 class AmbientScraper:
-    def __init__(self, download_dir: str = "./transcripts", browser_path: Optional[str] = None):
+    def __init__(
+        self,
+        download_dir: str = "./transcripts",
+        browser_path: Optional[str] = None,
+        auto_mode: bool = False,
+        all_series: bool = False,
+        target_url: Optional[str] = None
+    ):
         self.download_dir = Path(download_dir)
         self.download_dir.mkdir(exist_ok=True)
         self.browser_path = browser_path or os.environ.get('CHROMIUM_PATH')
         self.browser: Optional[Browser] = None
         self.context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
+        self.auto_mode = auto_mode
+        self.all_series = all_series
+        self.target_url = target_url
 
     async def setup(self):
         """Initialize Playwright and launch browser."""
@@ -65,7 +75,31 @@ class AmbientScraper:
         self.page = await self.context.new_page()
 
     async def wait_for_navigation(self):
-        """Wait for user to log in and navigate to target page."""
+        """Wait for user to log in and navigate to target page.
+
+        In auto_mode with target_url: navigates directly without user input.
+        In auto_mode without target_url: skips instructions, waits briefly.
+        In manual mode: shows instructions and waits for ENTER.
+        """
+        if self.auto_mode and self.target_url:
+            # Auto mode with specific target - go directly there
+            print(f"[Auto] Navigating to: {self.target_url}")
+            await self.page.goto(self.target_url)
+            await self.page.wait_for_load_state('networkidle')
+            current_url = self.page.url
+            return self.detect_page_type(current_url)
+
+        if self.auto_mode:
+            # Auto mode without target - wait for existing navigation
+            print("[Auto] Waiting for page to be ready...")
+            await self.page.goto('https://app.ambient.us/')
+            await self.page.wait_for_load_state('networkidle')
+            # Brief wait for any redirects
+            await asyncio.sleep(2)
+            current_url = self.page.url
+            return self.detect_page_type(current_url)
+
+        # Manual mode - show instructions and wait for user
         print("\n" + "="*60)
         print("INSTRUCTIONS:")
         print("="*60)
@@ -353,12 +387,30 @@ async def main():
         default='./transcripts',
         help='Directory to save transcripts (default: ./transcripts)'
     )
+    parser.add_argument(
+        '--auto',
+        action='store_true',
+        help='Run in auto mode (skip user input prompts)'
+    )
+    parser.add_argument(
+        '--all-series',
+        action='store_true',
+        help='Process all meeting series automatically'
+    )
+    parser.add_argument(
+        '--target-url',
+        type=str,
+        help='Navigate directly to this URL (requires --auto)'
+    )
 
     args = parser.parse_args()
 
     scraper = AmbientScraper(
         download_dir=args.download_dir,
-        browser_path=args.browser_path
+        browser_path=args.browser_path,
+        auto_mode=args.auto,
+        all_series=args.all_series,
+        target_url=args.target_url
     )
     await scraper.run()
 
