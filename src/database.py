@@ -36,5 +36,38 @@ class TranscriptTracker:
         ''')
         self.conn.commit()
 
+    def is_processed(self, filepath: str) -> bool:
+        """Check if a transcript has already been processed."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT 1 FROM processed_transcripts WHERE filepath = ?",
+            (filepath,)
+        )
+        return cursor.fetchone() is not None
+
+    def mark_processed(
+        self,
+        filepath: str,
+        filename: str,
+        meeting_date: str,
+        client_entity: str,
+        status: str
+    ):
+        """Mark a transcript as processed."""
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            INSERT OR REPLACE INTO processed_transcripts
+            (filepath, filename, meeting_date, client_entity, status)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (filepath, filename, meeting_date, client_entity, status))
+        self.conn.commit()
+
+    def get_unprocessed(self, all_files: List[str]) -> List[str]:
+        """Get list of files that haven't been processed yet."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT filepath FROM processed_transcripts")
+        processed = {row[0] for row in cursor.fetchall()}
+        return [f for f in all_files if f not in processed]
+
     def close(self):
         self.conn.close()
