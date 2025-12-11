@@ -92,8 +92,11 @@ class DailySync:
             # Update memory
             self.memory.update_from_transcript(client, processed)
 
-            # Mark as processed
-            meeting_date = processed.get("date") or self.extract_date_from_filename(Path(filepath).name) or "unknown"
+            # Mark as processed - use filename date if Claude returned placeholder
+            extracted_date = processed.get("date")
+            if not extracted_date or extracted_date == "YYYY-MM-DD" or not extracted_date[0].isdigit():
+                extracted_date = self.extract_date_from_filename(Path(filepath).name)
+            meeting_date = extracted_date or "unknown"
             self.tracker.mark_processed(
                 filepath=filepath,
                 filename=Path(filepath).name,
@@ -162,8 +165,13 @@ def main():
     parser.add_argument("--db-path", default="./processing.db", help="SQLite database path")
     parser.add_argument("--limit", type=int, help="Limit number of transcripts to process")
     parser.add_argument("--dry-run", action="store_true", help="Show what would be processed")
+    parser.add_argument("--api-key", help="Anthropic API key (or set ANTHROPIC_API_KEY env var)")
 
     args = parser.parse_args()
+
+    # Set API key if provided
+    if args.api_key:
+        os.environ["ANTHROPIC_API_KEY"] = args.api_key
 
     sync = DailySync(
         transcripts_dir=args.transcripts_dir,

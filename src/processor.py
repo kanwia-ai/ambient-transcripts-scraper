@@ -27,7 +27,7 @@ Transcript:
 class TranscriptProcessor:
     def __init__(self, api_key: Optional[str] = None):
         self.client = Anthropic(api_key=api_key or os.getenv("ANTHROPIC_API_KEY"))
-        self.model = "claude-3-haiku-20240307"
+        self.model = "claude-sonnet-4-20250514"  # Sonnet 4
 
     def process_transcript(self, transcript_text: str) -> Dict[str, Any]:
         """Process a transcript and extract structured data."""
