@@ -38,7 +38,23 @@ playwright install chromium
 
 ## Usage
 
-### Basic Usage
+### Download Everything (Recommended)
+
+Scrape your entire Ambient dashboard — meeting series AND individual meetings:
+
+```bash
+python scraper.py --auto-all
+```
+
+On the first run, you'll need to log in manually in the browser window that opens. After that, your session is saved and future runs are fully automated.
+
+### Scrape a Specific Series (Non-Interactive)
+
+```bash
+python scraper.py --auto --url "https://app.ambient.us/dashboard/meetingseries/YOUR_SERIES_ID"
+```
+
+### Interactive Mode (Original)
 
 ```bash
 python scraper.py
@@ -48,23 +64,22 @@ python scraper.py
 
 If you already have Chromium installed or can't install Playwright's browser:
 
-**Option 1: Command-line argument**
 ```bash
 python scraper.py --browser-path /path/to/chromium
 ```
 
-**Option 2: Environment variable**
-```bash
-export CHROMIUM_PATH=/path/to/chromium
-python scraper.py
-```
+### All Options
 
-**Finding your Chromium path:**
-```bash
-which chromium  # or chromium-browser, google-chrome, etc.
-```
+| Flag | Description |
+|---|---|
+| `--auto-all` | Discover all meeting series and scrape everything |
+| `--auto` | Skip interactive prompts (requires `--url`) |
+| `--url URL` | URL of a specific meeting series or project to scrape |
+| `--browser-path PATH` | Path to Chromium executable |
+| `--download-dir DIR` | Directory to save transcripts (default: `./transcripts`) |
+| `--clear-session` | Clear saved login session and log in again |
 
-### Step-by-Step Process
+### Step-by-Step Process (Interactive Mode)
 
 1. **Run the script**:
    ```bash
@@ -118,18 +133,26 @@ The scraper is **additive** - if you've already downloaded transcripts from a me
 
 Perfect for regular updates!
 
-## Example Workflow
+## Example Workflows
 
 ```bash
-# First time: Download all transcripts from a meeting series
+# Download EVERYTHING from your account
+python scraper.py --auto-all
+# -> First run: log in when prompted, then it auto-discovers all series
+# -> Downloads all transcripts from every meeting series
+# -> Prints summary: X series found, Y transcripts downloaded, Z skipped
+
+# Run again later to get only new transcripts (incremental)
+python scraper.py --auto-all
+# -> Uses saved auth, discovers series, skips existing files
+# -> Only downloads new transcripts since last run
+
+# Scrape a specific series without interaction
+python scraper.py --auto --url "https://app.ambient.us/dashboard/meetingseries/abc123"
+
+# Interactive mode (original behavior)
 python scraper.py
 # -> Log in, navigate to meeting series, press ENTER
-# -> Downloads all 25 transcripts
-
-# Two weeks later: Get new transcripts
-python scraper.py
-# -> Log in, navigate to same meeting series, press ENTER
-# -> Skips existing 25, downloads only the 3 new ones
 ```
 
 ## Troubleshooting
