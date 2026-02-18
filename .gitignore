@@ -53,3 +53,4 @@ downloads/
 transcripts/
 *.log
 .worktrees/
+.no_transcript_cache.json

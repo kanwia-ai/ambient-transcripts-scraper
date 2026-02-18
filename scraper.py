@@ -20,11 +20,12 @@ The script will:
 
 import argparse
 import asyncio
+import json
 import os
 import re
 import time
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Set
 from urllib.parse import urlparse
 
 from playwright.async_api import (
@@ -43,6 +44,38 @@ class AmbientScraper:
         self.page: Optional[Page] = None
         # Auth state file to persist login session
         self.auth_state_file = self.download_dir / "auth_state.json"
+        # Cache of meetings known to have no transcript content
+        self.no_transcript_cache_file = self.download_dir / ".no_transcript_cache.json"
+        self.no_transcript_cache: Set[str] = self._load_no_transcript_cache()
+
+    def _load_no_transcript_cache(self) -> Set[str]:
+        """Load the set of meeting keys known to have no transcript."""
+        if self.no_transcript_cache_file.exists():
+            try:
+                data = json.loads(self.no_transcript_cache_file.read_text())
+                return set(data)
+            except (json.JSONDecodeError, TypeError):
+                return set()
+        return set()
+
+    def _save_no_transcript_cache(self):
+        """Persist the no-transcript cache to disk."""
+        self.no_transcript_cache_file.write_text(
+            json.dumps(sorted(self.no_transcript_cache), indent=2)
+        )
+
+    def _make_cache_key(self, title: str, date: str) -> str:
+        """Create a stable cache key from meeting title and date."""
+        return f"{title.strip()}|{date.strip()}"
+
+    def _is_transcript_empty(self, filepath: Path) -> bool:
+        """Check if a downloaded transcript file has no real content."""
+        try:
+            content = filepath.read_text(encoding='utf-8', errors='ignore').strip()
+            # Empty, or just whitespace/newlines, or under 20 chars (e.g. just a header)
+            return len(content) < 20
+        except Exception:
+            return True
 
     async def setup(self):
         """Initialize Playwright and launch browser."""
@@ -782,6 +815,13 @@ class AmbientScraper:
 
             # Save the file with original filename
             await download.save_as(filepath)
+
+            # Check if the downloaded file is empty
+            if self._is_transcript_empty(filepath):
+                filepath.unlink()
+                print(f"⏭️  Empty transcript — deleted: {suggested_filename}")
+                return "skipped"
+
             print(f"✅ Saved: {suggested_filename}")
 
             return filepath
@@ -1117,6 +1157,13 @@ class AmbientScraper:
                 card_title = card_info.get('title', '')
                 card_date = card_info.get('date', '')
                 if card_title and card_date:
+                    # Check no-transcript cache first
+                    cache_key = self._make_cache_key(card_title, card_date)
+                    if cache_key in self.no_transcript_cache:
+                        print(f"  ⏭️  No transcript (cached): {card_title} ({card_date})")
+                        skipped += 1
+                        continue
+
                     # Filenames look like "All Hands 2026-02-09 15_01 transcript.txt"
                     # We can't know the exact time from the card reliably, so check if
                     # ANY file starts with "title date" pattern
@@ -1147,7 +1194,10 @@ class AmbientScraper:
 
                     if not drawer:
                         print(f"    No drawer opened — skipping")
-                        failed += 1
+                        if card_title and card_date:
+                            self.no_transcript_cache.add(self._make_cache_key(card_title, card_date))
+                            self._save_no_transcript_cache()
+                        skipped += 1
                         continue
 
                     # Step 3: Click "Transcript" toggle button inside the drawer
@@ -1167,9 +1217,12 @@ class AmbientScraper:
 
                     if not transcript_clicked.get('clicked'):
                         print(f"    No Transcript button in drawer — skipping")
+                        if card_title and card_date:
+                            self.no_transcript_cache.add(self._make_cache_key(card_title, card_date))
+                            self._save_no_transcript_cache()
                         await self.page.keyboard.press('Escape')
                         await asyncio.sleep(0.5)
-                        failed += 1
+                        skipped += 1
                         continue
 
                     await asyncio.sleep(1)
@@ -1188,9 +1241,12 @@ class AmbientScraper:
 
                     if not has_dl_btn:
                         print(f"    No Download Transcript button — skipping")
+                        if card_title and card_date:
+                            self.no_transcript_cache.add(self._make_cache_key(card_title, card_date))
+                            self._save_no_transcript_cache()
                         await self.page.keyboard.press('Escape')
                         await asyncio.sleep(0.5)
-                        failed += 1
+                        skipped += 1
                         continue
 
                     # Step 5: Click Download Transcript with expect_download
@@ -1240,9 +1296,18 @@ class AmbientScraper:
                             skipped += 1
                         else:
                             await download.save_as(filepath)
-                            existing.add(suggested_filename)
-                            downloaded += 1
-                            print(f"    ✅ Downloaded → {card_folder.name}/{suggested_filename}")
+                            # Check if the downloaded file is empty
+                            if self._is_transcript_empty(filepath):
+                                filepath.unlink()
+                                print(f"    ⏭️  Empty transcript — deleted: {suggested_filename}")
+                                if card_title and card_date:
+                                    self.no_transcript_cache.add(self._make_cache_key(card_title, card_date))
+                                    self._save_no_transcript_cache()
+                                skipped += 1
+                            else:
+                                existing.add(suggested_filename)
+                                downloaded += 1
+                                print(f"    ✅ Downloaded → {card_folder.name}/{suggested_filename}")
 
                     except Exception as dl_err:
                         print(f"    ❌ Download failed: {dl_err}")
@@ -1524,6 +1589,11 @@ async def main():
         action='store_true',
         help='Clear saved login session and log in again'
     )
+    parser.add_argument(
+        '--clear-cache',
+        action='store_true',
+        help='Clear the no-transcript cache (re-check meetings previously marked as having no transcript)'
+    )
 
     args = parser.parse_args()
 
@@ -1536,6 +1606,12 @@ async def main():
     if args.clear_session and scraper.auth_state_file.exists():
         scraper.auth_state_file.unlink()
         print("Cleared saved login session")
+
+    # Clear no-transcript cache if requested
+    if args.clear_cache and scraper.no_transcript_cache_file.exists():
+        scraper.no_transcript_cache_file.unlink()
+        scraper.no_transcript_cache = set()
+        print("Cleared no-transcript cache")
 
     # Determine run mode
     if args.auto_all:
