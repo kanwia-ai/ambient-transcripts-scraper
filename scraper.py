@@ -1311,6 +1311,10 @@ class AmbientScraper:
 
                     except Exception as dl_err:
                         print(f"    ❌ Download failed: {dl_err}")
+                        # Cache download failures (timeouts etc.) so we skip them next run
+                        if card_title and card_date:
+                            self.no_transcript_cache.add(self._make_cache_key(card_title, card_date))
+                            self._save_no_transcript_cache()
                         failed += 1
 
                 except Exception as e:
