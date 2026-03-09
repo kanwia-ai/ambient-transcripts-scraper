@@ -23,10 +23,11 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import List, Dict, Optional, Set
+from typing import List, Dict, Optional, Set, Tuple
 from urllib.parse import urlparse
 
 from playwright.async_api import (
@@ -1381,7 +1382,253 @@ class AmbientScraper:
 
         print(f"\n  Transcripts saved to: {self.download_dir}")
 
-    async def run(self, mode: str = 'interactive', url: Optional[str] = None, cutoff_days: Optional[int] = None):
+    # ── Transcript organization rules ──
+    # Order matters — first match wins. More specific patterns first.
+    ORGANIZE_RULES: List[Tuple[List[str], str]] = [
+        # ── Client-specific (most specific first) ──
+        (["General Catalyst", "GC x Section", "GC Capital", "GC Wealth", "GC Event", "GC Leaders", "GC AI for Leaders",
+          "Section x General Catalyst", "GC Workshop", "1x1 Claude Set up", "Claude 1x1 Set Up",
+          "Alex & Alli_Kyra (Section) - GC", "@generalcatalyst",
+          "GCW AI Champions", "Zoom _ GCW", "Zoom_ GCW", "GCW AI"], "General Catalyst"),
+        (["Adobe Internal Kickoff", "Adobe x Section", "AI for Adobe Sales",
+          "Kyra, Louise, Taylor _ re Adobe"], "Adobe"),
+        (["Asurion"], "Asurion"),
+        (["Autodesk"], "Autodesk"),
+        (["BSWH"], "BSWH"),
+        (["Comcast"], "Comcast"),
+        (["DeckSense"], "DeckSense"),
+        (["DoorDash", "Doordash"], "DoorDash"),
+        (["EchoStar"], "EchoStar"),
+        (["Havas"], "Havas"),
+        (["Horizon"], "Horizon"),
+        (["Howard Hughes", "HHX", "Ada Project", "Glean Pilot", "Section __ Glean"], "Howard Hughes"),
+        (["HP "], "HP"),
+        (["L'Oreal", "LOreal", "L'Oréal"], "L'Oreal"),
+        (["Martech"], "Martech"),
+        (["Nike"], "Nike"),
+        (["OpenAI"], "OpenAI"),
+        (["Pernod Ricard"], "Pernod Ricard"),
+        (["Perplexity"], "Perplexity"),
+        (["Publicis"], "Publicis"),
+        (["PwC"], "PwC"),
+        (["Standard Bank"], "Standard Bank"),
+        (["Unilever"], "Unilever"),
+        (["10x AI"], "10x AI"),
+        (["Rollins College", "Myriad 360", "Juxtapose"], "Builder"),
+        (["Block 2025"], "Block"),
+        (["HATCo x Section", "IMCo x Section", "IR x Section"], "General Catalyst"),
+
+        # GC Wealth / Zoom Section AI workshops
+        (["Zoom_ HR x Section", "Zoom_ Legal & Compliance x Section", "Zoom_ Marketing x Section",
+          "Zoom_ Operations x Section", "Zoom _ Re_ AI workspace",
+          "Zoom _ Section AI session"], "General Catalyst"),
+
+        # ABI
+        (["ABI"], "ABI"),
+
+        # ── 1:1s ──
+        (["Tom _ Kyra", "Tom __ Kyra", "Tom Tarpey and Kyra", "Kyra __ Tom"], "Tom _ Kyra"),
+        (["Lauren _ Kyra", "Lauren x Kyra", "Lauren_Kyra", "Lauren / Kyra", "Lauren Schiavone",
+          "Kyra __ Lauren S", "Kyra __ Lauren,"], "Lauren _ Kyra 1_1"),
+        (["Kyra & Alli", "Kyra __ Alli", "Alli _ Kyra", "Alli_Kyra", "Allison Sell and Kyra",
+          "Kyra_Taylor_Alli"], "Kyra & Alli 1x1"),
+        (["Kyra _ Mary", "Kyra __ Mary", "Mary _ Kyra", "Mary Moore"], "Kyra _ Mary 1_1"),
+        (["Kyra _ Cece", "Kyra __ Cece", "Cece _ Kyra", "Cece __ Kyra"], "Kyra _ Cece 1_1"),
+        (["Kyra _ Ryan", "Kyra __ Ryan", "Ryan _ Kyra", "Ryan __ Kyra", "Ryan Odibo",
+          "Ryan_Kyra", "Ryan Check In"], "Kyra _ Ryan 1_1"),
+        (["Kyra __ Greg", "Kyra _ Greg"], "Kyra _ Greg 1_1"),
+        (["Kyra __ Claudia", "Claudia _ Frank"], "Kyra _ Claudia"),
+        (["Kyra __ Hannah", "kyra_hannah", "Hannah Tsumoto and Kyra",
+          "Kyra Atekwana and Hannah Tsumoto"], "Kyra _ Hannah"),
+        (["Alexa __ Kyra"], "Kyra _ Alexa"),
+        (["Kyra _ Tahnee", "Tahnee Perry and Kyra"], "Kyra _ Tahnee"),
+        (["Kyra _ Bobby"], "Kyra _ Bobby"),
+        (["Kyra __ Edmundo", "Kyra Atekwana __ Edmundo"], "Kyra _ Edmundo"),
+        (["Kyra __ Jose"], "Kyra _ Jose"),
+        (["Kyra __ Kate"], "Kyra _ Kate"),
+        (["Kyra __ Lavanya"], "Kyra _ Lavanya"),
+        (["Kyra __ Dan", "Dan Slagen"], "Kyra _ Dan"),
+        (["Kyra __ Cristian"], "Kyra _ Cristian"),
+        (["Annie x Kyra"], "Kyra _ Annie"),
+        (["Solon __ Kyra"], "Kyra _ Solon"),
+        (["Erich Archer _ Kyra"], "Kyra _ Erich"),
+        (["Kyra _ Chloe"], "Kyra _ Chloe"),
+        (["Kyra _ Jerrell"], "Kyra _ Jerrell"),
+        (["Kyra _ Alex"], "Kyra _ Alex"),
+        (["Kyra _ Julio", "Kyra x Julio"], "Kyra _ Julio"),
+        (["Kyra (Section)_Taylor", "Kyra (Section) _Taylor", "Kyra x Taylor", "Taylor _ Kyra",
+          "Taylor_Kyra", "Taylor Powers"], "Kyra _ Taylor"),
+        (["Kyra & Siena"], "Kyra _ Siena"),
+        (["Kyra (Section) __ Yogesh", "Kyra __ Yogesh", "Kyra (Section AI) __ Yogesh"], "Kyra _ Yogesh"),
+        (["Sandra Noonan __ Kyra"], "Kyra _ Sandra"),
+        (["Rebecca _ Kyra"], "Kyra _ Rebecca"),
+        (["Fotemah"], "Kyra _ Fotemah"),
+        (["Kyra __ Lucas Berkeley"], "Kyra _ Lucas"),
+        (["Kyra __ Amit"], "Kyra _ Amit"),
+
+        # ── Section internal meetings ──
+        (["All Hands"], "All Hands"),
+        (["Company Lunch & Learn", "AI Lunch & Learn", "AI L&L", "Lunch & Learn"], "Company Lunch & Learn"),
+        (["Education Team Weekly", "Ed Team"], "Education Team Weekly"),
+        (["Enterprise Workshops Weekly", "Enterprise Experiences Weekly",
+          "Partnership Experiences Weekly"], "Enterprise Workshops Weekly"),
+        (["Direct to Employee", "DTE"], "Direct to Employee Experiences Weekly"),
+        (["AIT Consulting", "AIT 2026", "AIT Bootcamp", "AIT Services",
+          "AI Transformation Lead Bootcamp", "ai transformation weekly",
+          "Review 2026 AIT Goals", "AIT_Consulting_Weekly_Combined"], "AIT Consulting Weekly"),
+        (["Weekly Proposal Review", "Section Proposal Review"], "Weekly Proposal Review"),
+        (["Account Roles & Responsibilities", "Capacity Planning", "Sales Enablement",
+          "Sales Team Workshop", "Upskilling Team", "Promotion Convo", "Harvest Overview",
+          "Connecting on Section", "Next steps with Section", "Discuss Workshop Opportunities",
+          "Discuss workshop processes", "Section Workshops Design", "Workshops Lead Role",
+          "Transition Q's + OOO", "Follow up 2026", "Task Assignments and Responsibilities",
+          "New Facilitation Opportunity", "Sync on PS x Section",
+          "Review AI deployment", "Tom __ Greg"], "Section Internal"),
+
+        # ── Education / Content / Courses ──
+        (["AI for Negotiations"], "Education - AI for Negotiations"),
+        (["AI for Programmers", "Ai for Programmers"], "Education - AI for Programmers"),
+        (["AI for Research"], "Education - AI for Research"),
+        (["AI for Team Leaders"], "Education - AI for Team Leaders"),
+        (["Content Call_ AI for Product Managers"], "Education - AI for Product Managers"),
+        (["AI for Marketers", "AI for Marketing"], "Education - AI for Marketers"),
+        (["AI for PR & Comms", "AI for PR"], "Education - AI for PR"),
+        (["AI for Strategic"], "Education - AI for Strategic Decisions"),
+        (["AI for Sales"], "Education - AI for Sales"),
+        (["AI for Innovation"], "Education - AI for Innovation"),
+        (["AI for Data Analysis"], "Education - AI for Data Analysis"),
+        (["AI Crash Course", "AI CC Walkthrough"], "Education - AI Crash Course"),
+        (["Mini-MBA", "MMBA", "Springboard MMBA", "Executive MBA Program"], "Education - Mini-MBA"),
+        (["Bootcamp Week", "Agent Builder Bootcamp", "AI Agent Workshop",
+          "Week 2 Check In"], "Education - Bootcamp"),
+        (["Dry Run"], "Education - Dry Runs"),
+        (["Table Read"], "Education - Table Reads"),
+        (["Work Design Course"], "Education - Work Design Course"),
+        (["Content Check-in", "Content Call"], "Education - Content Calls"),
+        (["Live Lecture", "Keynote Lecture", "Keynote Chat", "Fireside Chat"], "Education - Lectures"),
+        (["Live Sessions + ProfAI", "ProfAI", "Prof AI"], "Education - ProfAI"),
+        (["Redesigning Workflows", "Workflow Redesign", "Section Workflow"], "Education - Workflow Redesign"),
+        (["AI Discovery and Prioritization", "AI Discovery & Prioritization",
+          "AI use-case Discovery", "Customer Solutions - AI Discovery",
+          "Technology - AI Discovery"], "Education - AI Discovery Sessions"),
+        (["Train the Trainer"], "Education - Train the Trainer"),
+        (["Section AI Kick Off", "Section AI for Professional"], "Education - Section AI"),
+        (["Why of AI"], "Education - Why of AI"),
+        (["AI Business Strategy"], "Education - AI Business Strategy"),
+        (["Mandatory AI Workshop", "Section Facilitation Request", "Custom workshop sync",
+          "Custom GPT Follow Up", "Enterprise Custom Course", "AI Workflow Audit",
+          "Copilot Overview", "Enhancing AI", "Integrating AI", "Refining AI Workflows",
+          "Refining Workshop", "Strategic AI Adoption", "Strategic Restructuring",
+          "Teams Refresh", "AI Productivity Session", "Marketing Offsite AI Workshop",
+          "Review Section AI Workshop", "AI Platform Specialist", "AI Presentation 1",
+          "Internal Kickoff_ Building", "Build An Agentic AI Product",
+          "Content Check-in_ Building Agentic", "Concurrent Tech CC", "Section AI session",
+          "Exploring AI Tool Adoption", "AI Job Description", "HR Pilot"], "Education - Workshops"),
+
+        # ── PRD / Product Work ──
+        (["PRD Process", "PRD Use Case", "PRD Worflow", "PRD Kickoff", "PRD Automation",
+          "Connect - PRD"], "PRD Work"),
+
+        # ── Interviews ──
+        (["Interview", "Interivew", "Fii Stephen", "Jaiden Howard",
+          "Jasmine Shells", "MBA Intern Interviews"], "Interviews"),
+
+        # ── External 1:1s / Calls (people meeting Kyra) ──
+        (["and Kyra Atekwana", "Kyra Atekwana and", "Sharla Walkey", "Teresa Carlson",
+          "Jake __ Section", "Kyra + Amy", "Renee Rober", "Great Meeting _ Follow-up",
+          "Quick brainstorm re_ Alli", "Real-time forecasting", "AI Advisory",
+          "Ana Silva", "Kyra <> Daniel", "Kyra _ Curt", "Kyra _ Caitlin"], "External Meetings"),
+
+        # ── Personal ──
+        (["Angel Investing", "African Food", "Garage Door", "Brand conversation",
+          "R+J_ Co-Producer", "Mind Mapping", "Superhuman team training",
+          "Slide Brainstorm", "PPT brainstorm", "Evaluating AI Tools for Enterprise PowerPoint",
+          "DS Meeting", "MCP Demo", "Product Teardown",
+          "Funeral", "Honouring Mammy", "Honoring Mammi", "Pa Nkwate", "Memorial Planning",
+          "Maryland Wake", "Funeral Program", "Program Committee"], "Personal"),
+
+        # ── Catch-all patterns (least specific, last) ──
+        (["Review 1 "], "Reviews"),
+        (["Review 2025", "Review 2026"], "Reviews"),
+    ]
+
+    def _match_organize_folder(self, filename: str) -> Optional[str]:
+        """Return the target folder name for a filename, or None if no match."""
+        for patterns, folder in self.ORGANIZE_RULES:
+            for pattern in patterns:
+                if pattern.lower() in filename.lower():
+                    return folder
+        return None
+
+    def organize_transcripts(self):
+        """Organize transcripts from Individual Meetings and Downloads into client folders."""
+        print("\n" + "=" * 60)
+        print("ORGANIZING TRANSCRIPTS INTO CLIENT FOLDERS")
+        print("=" * 60)
+
+        downloads = Path.home() / "Downloads"
+        downloads_transcripts = downloads / "Transcripts"
+        individual = self.download_dir / "Individual Meetings"
+
+        files_to_process = []
+
+        # From Individual Meetings
+        if individual.exists():
+            for f in individual.iterdir():
+                if f.is_file() and f.suffix == '.txt':
+                    files_to_process.append(f)
+
+        # From Downloads (root) — only files with "transcript" in name
+        if downloads.exists():
+            for f in downloads.iterdir():
+                if f.is_file() and 'transcript' in f.name.lower() and f.suffix == '.txt':
+                    files_to_process.append(f)
+
+        # From Downloads/Transcripts
+        if downloads_transcripts.exists():
+            for f in downloads_transcripts.iterdir():
+                if f.is_file() and f.suffix == '.txt':
+                    files_to_process.append(f)
+
+        if not files_to_process:
+            print("  No transcript files to organize")
+            return
+
+        print(f"  Found {len(files_to_process)} transcript files to organize\n")
+
+        moved = 0
+        skipped = 0
+        unmatched = []
+
+        for f in files_to_process:
+            folder_name = self._match_organize_folder(f.name)
+            if folder_name:
+                target_dir = self.download_dir / folder_name
+                target_dir.mkdir(exist_ok=True)
+                target_path = target_dir / f.name
+
+                if target_path.exists():
+                    skipped += 1
+                    continue
+
+                shutil.move(str(f), str(target_path))
+                moved += 1
+                print(f"  → {folder_name}/{f.name}")
+            else:
+                unmatched.append(f.name)
+
+        print(f"\n{'='*60}")
+        print(f"  Moved:     {moved}")
+        print(f"  Skipped:   {skipped} (already exist)")
+        print(f"  Unmatched: {len(unmatched)}")
+        print(f"{'='*60}")
+
+        if unmatched:
+            print(f"\n  Unmatched files ({len(unmatched)}):")
+            for name in sorted(unmatched):
+                print(f"    - {name}")
+
+    async def run(self, mode: str = 'interactive', url: Optional[str] = None, cutoff_days: Optional[int] = None, skip_organize: bool = False):
         """Main execution flow.
 
         Args:
@@ -1389,8 +1636,13 @@ class AmbientScraper:
                   or 'auto_all' (discover and scrape everything)
             url: URL to scrape (required for 'auto' mode)
             cutoff_days: Only check meetings from the last N days. None = all.
+            skip_organize: If True, skip organizing transcripts into client folders.
         """
         try:
+            if mode == 'organize_only':
+                self.organize_transcripts()
+                return
+
             await self.setup()
 
             if mode == 'auto_all':
@@ -1431,6 +1683,10 @@ class AmbientScraper:
                     await self.scrape_project()
                 elif page_type == 'my_meetings':
                     await self.scrape_my_meetings(cutoff_days=cutoff_days)
+
+            # Organize transcripts into client folders
+            if not skip_organize:
+                self.organize_transcripts()
 
             print("\nAll done!")
             if mode == 'interactive':
@@ -1495,6 +1751,16 @@ async def main():
         default=None,
         help='Only scrape meetings from the last N days (default: all)'
     )
+    parser.add_argument(
+        '--organize-only',
+        action='store_true',
+        help='Only organize existing transcripts into client folders (no scraping)'
+    )
+    parser.add_argument(
+        '--skip-organize',
+        action='store_true',
+        help='Skip organizing transcripts after scraping'
+    )
 
     args = parser.parse_args()
 
@@ -1502,6 +1768,11 @@ async def main():
         download_dir=args.download_dir,
         browser_path=args.browser_path
     )
+
+    # Organize-only mode: no browser needed
+    if args.organize_only:
+        await scraper.run(mode='organize_only')
+        return
 
     # Clear session if requested
     if args.clear_session and scraper.auth_state_file.exists():
@@ -1522,7 +1793,7 @@ async def main():
     else:
         mode = 'interactive'
 
-    await scraper.run(mode=mode, url=args.url, cutoff_days=args.cutoff_days)
+    await scraper.run(mode=mode, url=args.url, cutoff_days=args.cutoff_days, skip_organize=args.skip_organize)
 
 
 if __name__ == "__main__":
