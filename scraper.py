@@ -24,6 +24,7 @@ import json
 import os
 import re
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Dict, Optional, Set
 from urllib.parse import urlparse
@@ -151,19 +152,19 @@ class AmbientScraper:
             print("INSTRUCTIONS:")
             print("="*60)
             print("1. Log in to your Ambient account")
-            print("2. Navigate to either:")
-            print("   - A Meeting Series page (app.ambient.us/dashboard/meetingseries/...)")
-            print("   - A Project page (app.ambient.us/dashboard/projects/...)")
-            print("3. Once on the correct page, press ENTER here to continue")
+            print("2. You can either:")
+            print("   a) Stay on the dashboard to scrape ALL your meetings")
+            print("   b) Navigate to a Meeting Series page to scrape just that series")
+            print("   c) Navigate to a Project page to scrape just that project")
+            print("3. Press ENTER here to continue")
             print("="*60 + "\n")
         else:
             print("\n" + "="*60)
             print("INSTRUCTIONS:")
             print("="*60)
-            print("Navigate to either:")
-            print("   - A Meeting Series page (app.ambient.us/dashboard/meetingseries/...)")
-            print("   - A Project page (app.ambient.us/dashboard/projects/...)")
-            print("Then press ENTER to continue")
+            print("You can either:")
+            print("   a) Press ENTER now to scrape ALL your meetings from the dashboard")
+            print("   b) Navigate to a specific Meeting Series or Project, then press ENTER")
             print("="*60 + "\n")
 
         await self.page.goto('https://app.ambient.us/')
@@ -191,13 +192,16 @@ class AmbientScraper:
         return self.detect_page_type(current_url)
 
     def detect_page_type(self, url: str) -> str:
-        """Detect whether we're on a meeting series or project page."""
+        """Detect whether we're on a meeting series, project, or dashboard/feed page."""
         if '/meetingseries/' in url:
             return 'meetingseries'
         elif '/projects/' in url:
             return 'project'
+        elif '/dashboard' in url:
+            # Dashboard home, feed, or My Meetings page — scrape all meetings
+            return 'my_meetings'
         else:
-            raise ValueError(f"Unknown page type. URL must contain '/meetingseries/' or '/projects/'\nCurrent URL: {url}")
+            raise ValueError(f"Unknown page type. URL must be an Ambient dashboard page.\nCurrent URL: {url}")
 
     def sanitize_filename(self, name: str) -> str:
         """Remove invalid characters from filename."""
@@ -952,45 +956,38 @@ class AmbientScraper:
 
         return unique
 
-    async def scrape_my_meetings(self):
-        """Navigate to My Meetings page and scrape ALL meetings with pagination.
+    async def scrape_my_meetings(self, cutoff_days: Optional[int] = None):
+        """Navigate to My Meetings page and scrape meetings with pagination.
 
-        This is the main workhorse: it paginates through the full My Meetings list,
-        collects every meeting URL, then visits each one to download transcripts.
-        Meetings already downloaded (from series scraping or prior runs) are skipped.
+        Extracts post IDs from the table via React fiber internals, then
+        navigates directly to each /dashboard/post/{id} page to download
+        the transcript.
+
+        Args:
+            cutoff_days: Only check meetings from the last N days. None = check all.
         """
         print("\n" + "=" * 60)
-        print("SCRAPING ALL MEETINGS FROM MY MEETINGS")
+        if cutoff_days:
+            cutoff_date = (datetime.now() - timedelta(days=cutoff_days)).strftime('%Y-%m-%d')
+            print(f"SCRAPING MEETINGS FROM LAST {cutoff_days} DAYS (since {cutoff_date})")
+        else:
+            cutoff_date = None
+            print("SCRAPING ALL MEETINGS FROM MY MEETINGS")
         print("=" * 60)
 
-        # Navigate to dashboard and ensure we're logged in
+        # Navigate to My Meetings feed page
         try:
-            await self.page.goto('https://app.ambient.us/dashboard', wait_until='domcontentloaded', timeout=60000)
+            await self.page.goto(
+                'https://app.ambient.us/dashboard/post?a=myMeetings',
+                wait_until='domcontentloaded', timeout=60000
+            )
         except Exception:
             pass  # Page may not fully settle — that's ok
         await asyncio.sleep(5)
         await self.ensure_authenticated()
         await self.context.storage_state(path=str(self.auth_state_file))
 
-        # Click "My Meetings" in sidebar
-        sidebar_clicked = False
-        for sel in ['nav a:has-text("My Meetings")', 'a:has-text("My Meetings")']:
-            try:
-                links = await self.page.query_selector_all(sel)
-                for link in links:
-                    text = (await link.text_content() or '').strip()
-                    if text.lower() == 'my meetings':
-                        await link.click()
-                        await self.page.wait_for_load_state('networkidle')
-                        await asyncio.sleep(2)
-                        sidebar_clicked = True
-                        break
-                if sidebar_clicked:
-                    break
-            except Exception:
-                continue
-
-        # Click "My Meetings" tab if it exists (shows count like "My Meetings 890")
+        # Click "My Meetings" tab if it exists (shows count like "My Meetings 924")
         for sel in ['button:has-text("My Meetings")', '[role="tab"]:has-text("My Meetings")']:
             try:
                 tabs = await self.page.query_selector_all(sel)
@@ -1008,8 +1005,6 @@ class AmbientScraper:
         await self.page.screenshot(path=str(debug_path), full_page=True)
         print(f"  Screenshot: {debug_path}")
 
-        # ---- Click-based approach: cards are not <a> tags ----
-        # We click each card, land on meeting page, download transcript, go back.
         existing = self._get_all_existing_filenames()
         print(f"Already have {len(existing)} transcript files on disk")
 
@@ -1018,6 +1013,8 @@ class AmbientScraper:
         failed = 0
         total_found = 0
         page_num = 0
+        reached_cutoff = False
+        my_meetings_url = 'https://app.ambient.us/dashboard/post?a=myMeetings'
 
         while True:
             page_num += 1
@@ -1026,9 +1023,9 @@ class AmbientScraper:
             existing = self._get_all_existing_filenames()
 
             # Get pagination info for display
-            pag_info = await self.page.evaluate('''() => {
+            pag_info = await self.page.evaluate(r'''() => {
                 const text = document.body.innerText;
-                const m = text.match(/(\\d+)[-–](\\d+)\\s+of\\s+(\\d+)/);
+                const m = text.match(/(\d+)[-\u2013](\d+)\s+of\s+(\d+)/);
                 return m ? { start: parseInt(m[1]), end: parseInt(m[2]), total: parseInt(m[3]) } : null;
             }''')
             if pag_info:
@@ -1036,294 +1033,175 @@ class AmbientScraper:
             else:
                 print(f"\n--- Page {page_num} ---")
 
-            # Find all MUI Card elements on the current page.
-            # Ambient uses Material UI — cards are div.MuiCard-root with cursor:pointer.
-            # Each card has a title (span.MuiTypography-button) and date text.
-            card_count = await self.page.evaluate('''() => {
-                // Primary: MUI Card components (class contains "MuiCard-root")
-                let cards = Array.from(document.querySelectorAll('.MuiCard-root, [class*="MuiCard"]'));
+            # Extract post IDs and metadata from table rows via React fiber.
+            meetings_on_page = await self.page.evaluate(r'''() => {
+                const rows = document.querySelectorAll('tr');
+                const meetings = [];
 
-                // Filter to cards that contain a date (meeting cards, not other UI cards)
-                const datePattern = /(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\\s+\\d{1,2},\\s+\\d{4}/;
-                cards = cards.filter(el => {
-                    const text = el.textContent || '';
-                    return datePattern.test(text) && text.length < 500;
-                });
+                for (const row of rows) {
+                    const text = (row.textContent || '').trim();
+                    if (text.length < 20) continue;
 
-                // Deduplicate: if a card contains another MuiCard, keep only the inner one
-                cards = cards.filter(el => {
-                    const nested = el.querySelectorAll('.MuiCard-root, [class*="MuiCard"]');
-                    const hasNestedCard = Array.from(nested).some(n => n !== el && datePattern.test(n.textContent || ''));
-                    return !hasNestedCard;
-                });
+                    // Extract post ID from React fiber tree
+                    const keys = Object.keys(row);
+                    const fiberKey = keys.find(k => k.startsWith('__reactFiber'));
+                    if (!fiberKey) continue;
 
-                // Mark each card with a data attribute so we can find them again
-                cards.forEach((card, i) => card.setAttribute('data-scraper-index', String(i)));
-                return cards.length;
-            }''')
+                    let fiber = row[fiberKey];
+                    let postId = null;
 
-            print(f"  Found {card_count} MUI meeting cards on this page")
-            if card_count == 0:
-                # Fallback: look for any clickable div with a date pattern
-                card_count = await self.page.evaluate('''() => {
-                    const datePattern = /(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\\s+\\d{1,2},\\s+\\d{4}/;
-                    const all = document.querySelectorAll('[class*="Card"], [class*="Paper"], div[style*="cursor"]');
-                    const cards = [];
-
-                    for (const el of all) {
-                        const text = (el.textContent || '').trim();
-                        if (!datePattern.test(text)) continue;
-                        if (text.length > 500) continue;
-
-                        const style = window.getComputedStyle(el);
-                        if (style.cursor !== 'pointer') continue;
-
-                        // Skip containers that have nested cards
-                        const nested = el.querySelectorAll('[class*="Card"]');
-                        const hasNested = Array.from(nested).some(n => n !== el && datePattern.test(n.textContent || ''));
-                        if (hasNested) continue;
-
-                        cards.push(el);
+                    let current = fiber;
+                    let depth = 0;
+                    while (current && depth < 25) {
+                        const props = current.memoizedProps || current.pendingProps || {};
+                        for (const key of ['id', 'postId', 'meetingId']) {
+                            if (props[key] && typeof props[key] === 'string' && props[key].includes('-')) {
+                                postId = props[key];
+                                break;
+                            }
+                        }
+                        if (!postId && props.post && props.post.id) postId = props.post.id;
+                        if (!postId && props.row && props.row.id) postId = props.row.id;
+                        if (!postId && props.item && props.item.id) postId = props.item.id;
+                        if (postId) break;
+                        current = current.return;
+                        depth++;
                     }
 
-                    cards.forEach((card, i) => card.setAttribute('data-scraper-index', String(i)));
-                    return cards.length;
-                }''')
-                print(f"  Fallback search found {card_count} cards")
+                    if (!postId) continue;
 
-            if card_count == 0:
-                print("  No meeting cards found — stopping")
-                await self.page.screenshot(path=str(self.download_dir / f"debug_no_cards_page{page_num}.png"), full_page=True)
+                    // Extract title and date from the row cells
+                    const tds = row.querySelectorAll('td');
+                    let title = '';
+                    let dateStr = '';
+
+                    // td[1] = title cell (td[0] is checkbox)
+                    if (tds.length > 1) {
+                        const titleP = tds[1].querySelector('.post-table-title-link, p');
+                        if (titleP) title = (titleP.textContent || '').trim();
+                    }
+
+                    // td[2] = date cell — format "3/9/2026, 3:47PM"
+                    if (tds.length > 2) {
+                        const dateText = (tds[2].textContent || '').trim().replace(/\s+/g, ' ');
+                        const m = dateText.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+                        if (m) {
+                            dateStr = m[3] + '-' + m[1].padStart(2, '0') + '-' + m[2].padStart(2, '0');
+                        }
+                    }
+
+                    meetings.push({ postId, title, date: dateStr });
+                }
+
+                return meetings;
+            }''')
+
+            print(f"  Found {len(meetings_on_page)} meeting items on this page")
+
+            if not meetings_on_page:
+                print("  No meetings found — stopping")
+                await self.page.screenshot(path=str(self.download_dir / f"debug_no_meetings_page{page_num}.png"), full_page=True)
                 break
 
-            total_found += card_count
+            total_found += len(meetings_on_page)
 
-            # Click each card: opens a drawer → click "View full page" → download transcript → go back
-            for card_idx in range(card_count):
-                # Re-find the card (DOM may have changed after going back)
-                card_info = await self.page.evaluate(f'''() => {{
-                    const card = document.querySelector('[data-scraper-index="{card_idx}"]');
-                    if (!card) return null;
-                    const text = (card.textContent || '').trim().replace(/\\s+/g, ' ');
-                    // Extract meeting title and date from card text
-                    // Card text looks like: "All HandsKFeb 9, 2026 3:00 PM" where K is avatar initial
-                    const dateMatch = text.match(/(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\\s+(\\d{{1,2}}),?\\s+(\\d{{4}})(?:\\s+(\\d{{1,2}}):(\\d{{2}})\\s*(AM|PM))?/);
-                    let meetingTitle = '';
-                    let dateStr = '';
-                    let tag = '';
-                    if (dateMatch) {{
-                        const dateStart = text.indexOf(dateMatch[0]);
-                        // Title is everything before the date, minus the avatar initial (last char before month)
-                        let rawTitle = text.substring(0, dateStart).trim();
-                        // Remove trailing single uppercase letter (avatar initial like "K")
-                        rawTitle = rawTitle.replace(/[A-Z]$/, '').trim();
-                        meetingTitle = rawTitle;
-                        // Build date string like "2026-02-09"
-                        const months = {{'Jan':'01','Feb':'02','Mar':'03','Apr':'04','May':'05','Jun':'06',
-                                        'Jul':'07','Aug':'08','Sep':'09','Oct':'10','Nov':'11','Dec':'12'}};
-                        const mon = months[dateMatch[1]] || '01';
-                        const day = dateMatch[2].padStart(2, '0');
-                        const year = dateMatch[3];
-                        dateStr = year + '-' + mon + '-' + day;
-                        // Extract project/client tag: text after the AM/PM time
-                        const dateEnd = text.indexOf(dateMatch[0]) + dateMatch[0].length;
-                        const afterDate = text.substring(dateEnd).trim();
-                        if (afterDate.length > 0 && afterDate.length < 40) {{
-                            tag = afterDate;
-                        }}
-                    }}
-                    return {{ text: text.substring(0, 120), title: meetingTitle, date: dateStr, tag: tag }};
-                }}''')
+            # Visit each meeting's post page to download transcript
+            for card_idx, meeting in enumerate(meetings_on_page):
+                post_id = meeting['postId']
+                card_title = meeting.get('title', '')
+                card_date = meeting.get('date', '')
+                label = f"{card_title[:50]} ({card_date})" if card_title else post_id
+                print(f"  [{card_idx + 1}/{len(meetings_on_page)}] {label}")
 
-                if not card_info:
-                    print(f"  [{card_idx + 1}/{card_count}] Card not found — re-marking...")
-                    # Re-mark cards and retry
-                    await self._mark_meeting_cards()
-                    card_info = await self.page.evaluate(f'''() => {{
-                        const card = document.querySelector('[data-scraper-index="{card_idx}"]');
-                        if (!card) return null;
-                        const text = (card.textContent || '').trim().replace(/\\s+/g, ' ');
-                        return {{ text: text.substring(0, 120), title: '', date: '' }};
-                    }}''')
-                    if not card_info:
-                        print(f"  [{card_idx + 1}/{card_count}] Still not found — skipping")
-                        failed += 1
-                        continue
+                # Stop early if this meeting is older than the cutoff
+                if cutoff_date and card_date and card_date < cutoff_date:
+                    print(f"  \u23f9\ufe0f  Reached cutoff date ({cutoff_date}) — stopping")
+                    reached_cutoff = True
+                    break
 
-                label = card_info['text'][:70]
-                print(f"  [{card_idx + 1}/{card_count}] {label}")
-
-                # Pre-check: see if we already have this transcript based on title and date
-                card_title = card_info.get('title', '')
-                card_date = card_info.get('date', '')
                 if card_title and card_date:
                     # Check no-transcript cache first
                     cache_key = self._make_cache_key(card_title, card_date)
                     if cache_key in self.no_transcript_cache:
-                        print(f"  ⏭️  No transcript (cached): {card_title} ({card_date})")
+                        print(f"    \u23ed\ufe0f  No transcript (cached): {card_title} ({card_date})")
                         skipped += 1
                         continue
 
-                    # Filenames look like "All Hands 2026-02-09 15_01 transcript.txt"
-                    # We can't know the exact time from the card reliably, so check if
-                    # ANY file starts with "title date" pattern
-                    # Sanitize title same way Ambient does in filenames:
-                    # replace special chars with _ or space
+                    # Check if we already have this transcript on disk
                     safe_title = re.sub(r'[<>:"/\\|?*]', '_', card_title).strip()
                     prefix = f"{safe_title} {card_date}"
-                    # Check if any existing file starts with this prefix
                     match_found = any(f.startswith(prefix) for f in existing)
                     if match_found:
-                        print(f"  ⏭️  Already have transcript for: {safe_title} ({card_date})")
+                        print(f"    \u23ed\ufe0f  Already have transcript for: {safe_title} ({card_date})")
                         skipped += 1
                         continue
 
                 try:
-                    # Step 1: Click card to open drawer (no page navigation)
-                    await self.page.evaluate(f'''() => {{
-                        const card = document.querySelector('[data-scraper-index="{card_idx}"]');
-                        if (card) card.click();
-                    }}''')
+                    # Navigate to the individual post page
+                    post_url = f'https://app.ambient.us/dashboard/post/{post_id}'
+                    await self.page.goto(post_url, wait_until='domcontentloaded', timeout=30000)
                     await asyncio.sleep(2)
 
-                    # Step 2: Wait for drawer to appear
-                    drawer = await self.page.query_selector('.MuiDrawer-root')
-                    if not drawer:
-                        await asyncio.sleep(2)
-                        drawer = await self.page.query_selector('.MuiDrawer-root')
+                    # Use the existing download_transcript method which handles
+                    # clicking the Transcript tab and Download Transcript button
+                    # Determine folder for saving
+                    card_folder = self.download_dir / "Individual Meetings"
+                    if card_title:
+                        # Check if title matches an existing subfolder name
+                        matched = None
+                        for d in self.download_dir.iterdir():
+                            if not d.is_dir():
+                                continue
+                            dn = d.name.lower().replace('_', ' ').replace('  ', ' ')
+                            ct = card_title.lower().replace('_', ' ').replace('  ', ' ')
+                            if ct == dn or ct.startswith(dn) or dn.startswith(ct):
+                                matched = d.name
+                                break
+                        if matched:
+                            card_folder = self.download_dir / matched
+                    card_folder.mkdir(exist_ok=True)
 
-                    if not drawer:
-                        print(f"    No drawer opened — skipping")
-                        if card_title and card_date:
-                            self.no_transcript_cache.add(self._make_cache_key(card_title, card_date))
-                            self._save_no_transcript_cache()
-                        skipped += 1
-                        continue
+                    result = await self.download_transcript(card_folder)
 
-                    # Step 3: Click "Transcript" toggle button inside the drawer
-                    transcript_clicked = await self.page.evaluate('''() => {
-                        const drawer = document.querySelector('.MuiDrawer-root');
-                        if (!drawer) return { clicked: false, reason: 'no_drawer' };
-                        const buttons = drawer.querySelectorAll('button');
-                        for (const btn of buttons) {
-                            const text = (btn.textContent || '').trim();
-                            if (text === 'Transcript') {
-                                btn.click();
-                                return { clicked: true };
-                            }
-                        }
-                        return { clicked: false, reason: 'no_transcript_button' };
-                    }''')
-
-                    if not transcript_clicked.get('clicked'):
-                        print(f"    No Transcript button in drawer — skipping")
-                        if card_title and card_date:
-                            self.no_transcript_cache.add(self._make_cache_key(card_title, card_date))
-                            self._save_no_transcript_cache()
-                        await self.page.keyboard.press('Escape')
-                        await asyncio.sleep(0.5)
-                        skipped += 1
-                        continue
-
-                    await asyncio.sleep(1)
-
-                    # Step 4: Find "Download Transcript" button inside the drawer
-                    has_dl_btn = await self.page.evaluate('''() => {
-                        const drawer = document.querySelector('.MuiDrawer-root');
-                        if (!drawer) return false;
-                        const buttons = drawer.querySelectorAll('button');
-                        for (const btn of buttons) {
-                            const text = (btn.textContent || '').trim();
-                            if (text === 'Download Transcript') return true;
-                        }
-                        return false;
-                    }''')
-
-                    if not has_dl_btn:
-                        print(f"    No Download Transcript button — skipping")
-                        if card_title and card_date:
-                            self.no_transcript_cache.add(self._make_cache_key(card_title, card_date))
-                            self._save_no_transcript_cache()
-                        await self.page.keyboard.press('Escape')
-                        await asyncio.sleep(0.5)
-                        skipped += 1
-                        continue
-
-                    # Step 5: Click Download Transcript with expect_download
-                    try:
-                        async with self.page.expect_download(timeout=10000) as download_info:
-                            await self.page.evaluate('''() => {
-                                const drawer = document.querySelector('.MuiDrawer-root');
-                                if (!drawer) return;
-                                const buttons = drawer.querySelectorAll('button');
-                                for (const btn of buttons) {
-                                    const text = (btn.textContent || '').trim();
-                                    if (text === 'Download Transcript') {
-                                        btn.click();
-                                        return;
-                                    }
-                                }
-                            }''')
-
-                        download = await download_info.value
-                        suggested_filename = download.suggested_filename
-
-                        # Determine folder: use project/client tag, else match existing series folders, else Individual Meetings
-                        card_tag = card_info.get('tag', '').strip() if card_info else ''
-                        card_title_for_folder = card_info.get('title', '').strip() if card_info else ''
-                        if card_tag:
-                            card_folder = self.download_dir / card_tag
-                        elif card_title_for_folder:
-                            # Check if title matches an existing subfolder name
-                            matched = None
-                            for d in self.download_dir.iterdir():
-                                if not d.is_dir():
-                                    continue
-                                dn = d.name.lower().replace('_', ' ').replace('  ', ' ')
-                                ct = card_title_for_folder.lower().replace('_', ' ').replace('  ', ' ')
-                                if ct == dn or ct.startswith(dn) or dn.startswith(ct):
-                                    matched = d.name
-                                    break
-                            card_folder = self.download_dir / matched if matched else self.download_dir / "Individual Meetings"
-                        else:
-                            card_folder = self.download_dir / "Individual Meetings"
-                        card_folder.mkdir(exist_ok=True)
-
-                        filepath = card_folder / suggested_filename
-
-                        if filepath.exists() or suggested_filename in existing:
-                            print(f"    ⏭️  Already exists: {suggested_filename}")
-                            skipped += 1
-                        else:
-                            await download.save_as(filepath)
-                            # Check if the downloaded file is empty
-                            if self._is_transcript_empty(filepath):
-                                filepath.unlink()
-                                print(f"    ⏭️  Empty transcript — deleted: {suggested_filename}")
-                                if card_title and card_date:
-                                    self.no_transcript_cache.add(self._make_cache_key(card_title, card_date))
-                                    self._save_no_transcript_cache()
-                                skipped += 1
-                            else:
-                                existing.add(suggested_filename)
-                                downloaded += 1
-                                print(f"    ✅ Downloaded → {card_folder.name}/{suggested_filename}")
-
-                    except Exception as dl_err:
-                        print(f"    ❌ Download failed: {dl_err}")
-                        # Cache download failures (timeouts etc.) so we skip them next run
+                    if result is None:
+                        print(f"    \u26a0\ufe0f  No transcript available")
                         if card_title and card_date:
                             self.no_transcript_cache.add(self._make_cache_key(card_title, card_date))
                             self._save_no_transcript_cache()
                         failed += 1
+                    elif result == "skipped":
+                        skipped += 1
+                    else:
+                        existing.add(result.name if hasattr(result, 'name') else str(result))
+                        downloaded += 1
 
                 except Exception as e:
-                    print(f"    Error: {e}")
+                    print(f"    \u274c Error: {e}")
                     failed += 1
+
                 finally:
-                    # Always close the drawer before moving to next card
-                    await self.page.keyboard.press('Escape')
-                    await asyncio.sleep(0.5)
+                    # Navigate back to My Meetings list
+                    try:
+                        await self.page.goto(my_meetings_url, wait_until='domcontentloaded', timeout=30000)
+                        await asyncio.sleep(2)
+                        # Re-click My Meetings tab if needed
+                        for sel in ['button:has-text("My Meetings")', '[role="tab"]:has-text("My Meetings")']:
+                            try:
+                                tabs = await self.page.query_selector_all(sel)
+                                for tab in tabs:
+                                    text = (await tab.text_content() or '').strip()
+                                    if 'my meetings' in text.lower() and len(text) < 40:
+                                        await tab.click()
+                                        await asyncio.sleep(1)
+                                        break
+                            except Exception:
+                                continue
+                    except Exception:
+                        pass
+
+            # Stop if we hit the date cutoff
+            if reached_cutoff:
+                break
 
             # Try next page
             has_next = await self._go_to_next_page()
@@ -1332,7 +1210,7 @@ class AmbientScraper:
                 break
 
         print(f"\nMy Meetings complete:")
-        print(f"  Total cards: {total_found}")
+        print(f"  Total found: {total_found}")
         print(f"  Downloaded:  {downloaded}")
         print(f"  Skipped:     {skipped}")
         print(f"  Failed:      {failed}")
@@ -1345,19 +1223,27 @@ class AmbientScraper:
         }
 
     async def _mark_meeting_cards(self) -> int:
-        """Mark MUI meeting cards with data-scraper-index attributes. Returns count."""
+        """Mark meeting items with data-scraper-index attributes. Returns count."""
         return await self.page.evaluate(r'''() => {
             const datePattern = /(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},\s+\d{4}/;
-            let cards = Array.from(document.querySelectorAll('.MuiCard-root, [class*="MuiCard"]'));
-            cards = cards.filter(el => {
-                const text = el.textContent || '';
-                return datePattern.test(text) && text.length < 500;
-            });
-            // Skip containers that have nested cards (only keep leaf cards)
-            cards = cards.filter(el => {
+            let cards = [];
+
+            // Try MUI Cards first
+            let muiCards = Array.from(document.querySelectorAll('.MuiCard-root, [class*="MuiCard"]'));
+            muiCards = muiCards.filter(el => datePattern.test(el.textContent || '') && (el.textContent || '').length < 500);
+            muiCards = muiCards.filter(el => {
                 const nested = el.querySelectorAll('.MuiCard-root, [class*="MuiCard"]');
                 return !Array.from(nested).some(n => n !== el && datePattern.test(n.textContent || ''));
             });
+
+            if (muiCards.length > 0) {
+                cards = muiCards;
+            } else {
+                // Try table rows
+                const rows = Array.from(document.querySelectorAll('tr, [role="row"]'));
+                cards = rows.filter(el => datePattern.test(el.textContent || '') && (el.textContent || '').length < 800);
+            }
+
             cards.forEach((card, i) => card.setAttribute('data-scraper-index', String(i)));
             return cards.length;
         }''')
@@ -1476,10 +1362,10 @@ class AmbientScraper:
 
         return after_height > before_height
 
-    async def scrape_all(self):
-        """Scrape all meetings from the My Meetings page."""
+    async def scrape_all(self, cutoff_days: Optional[int] = None):
+        """Scrape meetings from the My Meetings page."""
 
-        results = await self.scrape_my_meetings()
+        results = await self.scrape_my_meetings(cutoff_days=cutoff_days)
 
         # ---- Summary ----
         print("\n" + "=" * 60)
@@ -1495,20 +1381,21 @@ class AmbientScraper:
 
         print(f"\n  Transcripts saved to: {self.download_dir}")
 
-    async def run(self, mode: str = 'interactive', url: Optional[str] = None):
+    async def run(self, mode: str = 'interactive', url: Optional[str] = None, cutoff_days: Optional[int] = None):
         """Main execution flow.
 
         Args:
             mode: 'interactive' (default), 'auto' (scrape url without prompts),
                   or 'auto_all' (discover and scrape everything)
             url: URL to scrape (required for 'auto' mode)
+            cutoff_days: Only check meetings from the last N days. None = all.
         """
         try:
             await self.setup()
 
             if mode == 'auto_all':
                 # discover_all_series handles auth check internally
-                await self.scrape_all()
+                await self.scrape_all(cutoff_days=cutoff_days)
 
             elif mode == 'auto':
                 if not url:
@@ -1531,6 +1418,8 @@ class AmbientScraper:
                     await self.scrape_meeting_series()
                 elif page_type == 'project':
                     await self.scrape_project()
+                elif page_type == 'my_meetings':
+                    await self.scrape_my_meetings(cutoff_days=cutoff_days)
 
             else:
                 # Existing interactive flow
@@ -1540,6 +1429,8 @@ class AmbientScraper:
                     await self.scrape_meeting_series()
                 elif page_type == 'project':
                     await self.scrape_project()
+                elif page_type == 'my_meetings':
+                    await self.scrape_my_meetings(cutoff_days=cutoff_days)
 
             print("\nAll done!")
             if mode == 'interactive':
@@ -1598,6 +1489,12 @@ async def main():
         action='store_true',
         help='Clear the no-transcript cache (re-check meetings previously marked as having no transcript)'
     )
+    parser.add_argument(
+        '--cutoff-days',
+        type=int,
+        default=None,
+        help='Only scrape meetings from the last N days (default: all)'
+    )
 
     args = parser.parse_args()
 
@@ -1625,7 +1522,7 @@ async def main():
     else:
         mode = 'interactive'
 
-    await scraper.run(mode=mode, url=args.url)
+    await scraper.run(mode=mode, url=args.url, cutoff_days=args.cutoff_days)
 
 
 if __name__ == "__main__":
